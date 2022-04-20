@@ -107,10 +107,21 @@ import geod24.Serialization;
 import std.datetime.systime : Clock, SysTime;
 import std.format;
 import std.meta : AliasSeq;
-import std.traits : fullyQualifiedName, Parameters, ReturnType;
+import std.traits : fullyQualifiedName, Parameters, ReturnType, hasUDA;
 
 import core.thread;
 import core.time;
+
+/// Methods marked with this attribute will not be treated as LocalRest command
+package struct NoCommandAttribute {}
+
+/// Ditto
+@property NoCommandAttribute noCommand()
+{
+	if (!__ctfe)
+        assert(0, "NoCommandAttribute must be used as an attribute");
+    return NoCommandAttribute.init;
+}
 
 /// Data sent by the caller
 private struct Command
@@ -673,7 +684,7 @@ private template ParamsRef (alias Func)
 
 *******************************************************************************/
 
-public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
+public class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 {
     static assert (!serializerInvalidReason!(S).length, serializerInvalidReason!S);
 
@@ -749,33 +760,38 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 mixin(
                 q{
                     case `%2$s`:
-                    Response res = Response(Status.Failed, cmd.id);
-
-                    // Provide informative message in case of filtered method
-                    if (cmd.method == filter.func_mangleof)
-                        res.data = SerializedData(format("Filtered method '%%s'", filter.pretty_func));
-                    else
+                    static if (!hasUDA!(ovrld, NoCommandAttribute))
                     {
-                        auto args = S.deserialize!(ArgWrapper!(Parameters!ovrld))(
-                            cmd.args.getS!S);
+                        Response res = Response(Status.Failed, cmd.id);
 
-                        try
+                        // Provide informative message in case of filtered method
+                        if (cmd.method == filter.func_mangleof)
+                            res.data = SerializedData(format("Filtered method '%%s'", filter.pretty_func));
+                        else
                         {
-                            static if (!is(ReturnType!ovrld == void))
-                                res.data = SerializedData(S.serialize(node.%1$s(args.args)));
-                            else
-                                node.%1$s(args.args);
-                            res.status = Status.Success;
+                            auto args = S.deserialize!(ArgWrapper!(Parameters!ovrld))(
+                                cmd.args.getS!S);
+
+                            try
+                            {
+                                static if (!is(ReturnType!ovrld == void))
+                                    res.data = SerializedData(S.serialize(node.%1$s(args.args)));
+                                else
+                                    node.%1$s(args.args);
+                                res.status = Status.Success;
+                            }
+                            catch (Exception e)
+                            {
+                                res.status = Status.ClientFailed;
+                                res.data = SerializedData(e.toString());
+                            }
                         }
-                        catch (Exception e)
-                        {
-                            res.status = Status.ClientFailed;
-                            res.data = SerializedData(e.toString());
-                        }
+
+                        resp_chn.write(res);
+                        return;
                     }
-
-                    resp_chn.write(res);
-                    return;
+                    else
+                        assert(0, "A no command is received through channel!");
                 }.format(member, ovrld.mangleof));
             }
         default:
@@ -1216,7 +1232,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         ***********************************************************************/
 
-        public void withTimeout (Dg) (Duration timeout, scope Dg dg)
+        public void withTimeout (Dg) (Duration timeout, scope Dg dg) @trusted
         {
             scope api = new RemoteAPI(this.ctrl.listener(), timeout);
             static assert(is(typeof({ dg(api); })),
@@ -1244,6 +1260,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         ParamsRef!(ovrld).Required required,
                         ParamsRef!(ovrld).Optional optional = ParamsRef!(ovrld).Default)
                 {
+                static if (!hasUDA!(ovrld, NoCommandAttribute))
+                {
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
@@ -1261,13 +1279,18 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                     if (res.status == Status.ClientFailed)
                         throw new ClientException(
                             format("Request to %s couldn't be processed : %s",
-                                   __PRETTY_FUNCTION__, res.data.get!string));
+                                __PRETTY_FUNCTION__, res.data.get!string));
 
                     if (res.status == Status.Timeout)
                         throw new Exception("Request timed-out");
 
                     static if (!is(ReturnType!(ovrld) == void))
                         return S.deserialize!(typeof(return))(res.data.getS!S());
+                }
+                else
+                {
+                    assert(false);
+                }
                 }
                 });
         }
