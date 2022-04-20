@@ -1216,7 +1216,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         ***********************************************************************/
 
-        public void withTimeout (Dg) (Duration timeout, scope Dg dg)
+        public void withTimeout (Dg) (Duration timeout, scope Dg dg) @trusted
         {
             scope api = new RemoteAPI(this.ctrl.listener(), timeout);
             static assert(is(typeof({ dg(api); })),
